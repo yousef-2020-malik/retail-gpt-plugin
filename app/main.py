@@ -2,9 +2,10 @@
 
 import os
 import uuid
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import stripe
@@ -23,17 +24,30 @@ app = FastAPI(
 )
 
 # -------------------------
-# Stripe (optional for now)
+# CORS (FOR WEB UX)
+# -------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------
+# Stripe (optional)
 # -------------------------
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "sk_test_dummy")
 
 # -------------------------
-# Storage (MVP in-memory)
+# In-memory storage (MVP)
 # -------------------------
 CARTS: Dict[str, Dict[str, Any]] = {}
 ORDERS: Dict[str, Dict[str, Any]] = {}
-
 
 # -------------------------
 # Models
@@ -72,8 +86,8 @@ def find_product(sku: str) -> Dict[str, Any]:
 def recalc_cart(cart: Dict[str, Any]) -> None:
     total = 0.0
     for it in cart["items"]:
-        total += float(it["unit_price"]) * int(it["qty"])
         it["line_total"] = round(float(it["unit_price"]) * int(it["qty"]), 2)
+        total += it["line_total"]
     cart["total"] = round(total, 2)
 
 
@@ -85,7 +99,7 @@ def get_cart_or_404(cart_id: str) -> Dict[str, Any]:
 
 
 # -------------------------
-# Routes
+# Root
 # -------------------------
 @app.get("/")
 def root():
@@ -117,7 +131,12 @@ def search_products(q: str):
 @app.post("/cart/create")
 def create_cart():
     cart_id = f"c_{uuid.uuid4().hex[:8]}"
-    CARTS[cart_id] = {"cart_id": cart_id, "currency": "AED", "items": [], "total": 0.0}
+    CARTS[cart_id] = {
+        "cart_id": cart_id,
+        "currency": "AED",
+        "items": [],
+        "total": 0.0,
+    }
     return CARTS[cart_id]
 
 
@@ -131,14 +150,12 @@ def add_item(req: AddItemRequest):
     cart = get_cart_or_404(req.cart_id)
     product = find_product(req.sku)
 
-    # If item already exists, increase qty (better UX)
     for it in cart["items"]:
         if it["sku"] == req.sku:
             it["qty"] += req.qty
             recalc_cart(cart)
             return cart
 
-    # Add new line
     cart["items"].append({
         "sku": product["sku"],
         "name": product["name"],
@@ -146,8 +163,9 @@ def add_item(req: AddItemRequest):
         "qty": req.qty,
         "unit_price": float(product["price"]),
         "currency": product.get("currency", "AED"),
-        "line_total": round(float(product["price"]) * int(req.qty), 2),
+        "line_total": round(float(product["price"]) * req.qty, 2),
     })
+
     recalc_cart(cart)
     return cart
 
@@ -156,21 +174,21 @@ def add_item(req: AddItemRequest):
 def update_item_qty(req: UpdateQtyRequest):
     cart = get_cart_or_404(req.cart_id)
 
+    updated_items: List[Dict[str, Any]] = []
     found = False
-    new_items: List[Dict[str, Any]] = []
+
     for it in cart["items"]:
         if it["sku"] == req.sku:
             found = True
             if req.qty == 0:
-                # remove
                 continue
             it["qty"] = req.qty
-        new_items.append(it)
+        updated_items.append(it)
 
     if not found:
         raise HTTPException(status_code=404, detail="Item not found in cart")
 
-    cart["items"] = new_items
+    cart["items"] = updated_items
     recalc_cart(cart)
     return cart
 
@@ -180,8 +198,10 @@ def remove_item(req: RemoveItemRequest):
     cart = get_cart_or_404(req.cart_id)
     before = len(cart["items"])
     cart["items"] = [it for it in cart["items"] if it["sku"] != req.sku]
+
     if len(cart["items"]) == before:
         raise HTTPException(status_code=404, detail="Item not found in cart")
+
     recalc_cart(cart)
     return cart
 
@@ -195,7 +215,7 @@ def clear_cart(cart_id: str):
 
 
 # -------------------------
-# Checkout (Retail assistant only)
+# Checkout
 # -------------------------
 @app.post("/checkout/place-order")
 def place_order(req: PlaceOrderRequest):
@@ -209,11 +229,10 @@ def place_order(req: PlaceOrderRequest):
         "status": "PLACED",
         "items": cart["items"],
         "total": cart["total"],
-        "currency": cart.get("currency", "AED"),
+        "currency": cart["currency"],
     }
-    ORDERS[order_id] = order
 
-    # Clear cart after placing order
+    ORDERS[order_id] = order
     CARTS.pop(req.cart_id, None)
 
     return order

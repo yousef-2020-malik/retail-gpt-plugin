@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 import stripe
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .data import PRODUCTS
 
@@ -42,7 +42,7 @@ class Product(BaseModel):
 class Cart(BaseModel):
     cart_id: str
     currency: str = "AED"
-    items: List[Dict[str, Any]] = []
+    items: List[Dict[str, Any]] = Field(default_factory=list)
     total: float = 0.0
 
 
@@ -83,6 +83,11 @@ def recalc_cart(cart: Dict[str, Any]) -> None:
 # Catalog
 # -------------------------
 
+@app.get("/products")
+def list_products():
+    return {"items": PRODUCTS}
+
+
 @app.get("/products/search")
 def search_products(q: str):
     q_lower = q.lower().strip()
@@ -91,6 +96,15 @@ def search_products(q: str):
         if q_lower in p["name"].lower() or q_lower in (p.get("brand", "").lower())
     ]
     return {"items": items}
+
+
+# -------------------------
+# Debug
+# -------------------------
+
+@app.get("/debug/carts")
+def debug_carts():
+    return {"count": len(CARTS), "cart_ids": list(CARTS.keys())}
 
 
 # -------------------------
@@ -115,7 +129,6 @@ def add_item(req: AddItemRequest):
 
     product = find_product(req.sku)
 
-    # If item exists, increment qty
     for it in cart["items"]:
         if it["sku"] == req.sku:
             it["qty"] += req.qty
@@ -125,10 +138,13 @@ def add_item(req: AddItemRequest):
     cart["items"].append({
         "sku": product["sku"],
         "name": product["name"],
+        "brand": product.get("brand"),
         "qty": req.qty,
         "unit_price": product["price"],
         "currency": product["currency"],
+        "line_total": round(product["price"] * req.qty, 2),
     })
+
     recalc_cart(cart)
     return cart
 
@@ -142,7 +158,7 @@ def get_cart(cart_id: str):
 
 
 # -------------------------
-# Checkout (NO redirect)
+# Checkout
 # -------------------------
 
 @app.post("/checkout/create-payment-intent")
@@ -150,24 +166,18 @@ def create_payment_intent(req: PaymentIntentRequest):
     cart = CARTS.get(req.cart_id)
     if not cart:
         raise HTTPException(status_code=404, detail="Cart not found")
-    if len(cart["items"]) == 0:
+    if not cart["items"]:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
-    amount = int(cart["total"] * 100)  # cents
-
-    # Force USD for now to avoid Stripe AED configuration issues during testing
+    amount = int(cart["total"] * 100)
     currency = "usd"
 
-    try:
-        intent = stripe.PaymentIntent.create(
-            amount=amount,
-            currency=currency,
-            automatic_payment_methods={"enabled": True},
-            metadata={"cart_id": req.cart_id},
-        )
-    except Exception as e:
-        # Show Stripe error clearly in Swagger
-        raise HTTPException(status_code=400, detail=str(e))
+    intent = stripe.PaymentIntent.create(
+        amount=amount,
+        currency=currency,
+        automatic_payment_methods={"enabled": True},
+        metadata={"cart_id": req.cart_id},
+    )
 
     return {
         "payment_intent_id": intent.id,
@@ -184,12 +194,8 @@ def confirm_order(req: ConfirmRequest):
         raise HTTPException(status_code=404, detail="Cart not found")
 
     intent = stripe.PaymentIntent.retrieve(req.payment_intent_id)
-
     if intent.status != "succeeded":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payment not completed. Status: {intent.status}"
-        )
+        raise HTTPException(status_code=400, detail=f"Payment status: {intent.status}")
 
     order_id = f"o_{uuid.uuid4().hex[:10]}"
     ORDERS[order_id] = {
@@ -197,22 +203,8 @@ def confirm_order(req: ConfirmRequest):
         "status": "CONFIRMED",
         "items": cart["items"],
         "total": cart["total"],
-        "payment_intent_id": req.payment_intent_id,
     }
 
-    # Clear cart after success
     CARTS.pop(req.cart_id, None)
 
     return {"order_id": order_id, "status": "CONFIRMED"}
-
-
-# -------------------------
-# Orders
-# -------------------------
-
-@app.get("/orders/{order_id}")
-def get_order(order_id: str):
-    order = ORDERS.get(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return order

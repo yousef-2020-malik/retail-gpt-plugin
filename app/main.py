@@ -2,48 +2,27 @@
 
 import os
 import uuid
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.openapi.utils import get_openapi
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv
 import stripe
 
-from app.data import PRODUCTS  # IMPORTANT: absolute import
+from app.data import PRODUCTS
+
 
 # -------------------------
-# App
+# App (NO custom_openapi)
 # -------------------------
 app = FastAPI(
     title="Retail Checkout API",
     version="1.0.0",
     description="Retail Checkout API for GPT Actions",
-)
-
-# -------------------------
-# FORCE OpenAPI (KEEP ROUTES)
-# -------------------------
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,   # 🔥 THIS IS THE FIX
-    )
-
-    openapi_schema["servers"] = [
+    servers=[
         {"url": "https://retail-gpt-plugin.onrender.com"}
-    ]
-
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-
-app.openapi = custom_openapi
+    ],
+)
 
 # -------------------------
 # Stripe
@@ -76,7 +55,7 @@ def find_product(sku: str):
 
 
 # -------------------------
-# Routes (THESE MUST EXIST)
+# Routes (Swagger MUST see these)
 # -------------------------
 @app.get("/")
 def root():
